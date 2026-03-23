@@ -7,7 +7,8 @@ from utils import (
     train_valid_split_by_date,
     fit_model,
     evaluate_model,
-    save_model,
+    save_artifacts,
+    FEATURE_COLS,
 )
 
 
@@ -19,6 +20,7 @@ def main():
 
     df = pd.read_csv(args.input)
     missing = validate_columns(df)
+
     if missing:
         raise ValueError(f"Thiếu cột bắt buộc: {missing}")
 
@@ -29,7 +31,14 @@ def main():
         raise ValueError("Không đủ dữ liệu để chia train/validation.")
 
     model = fit_model(train_df)
-    metrics, _ = evaluate_model(model, valid_df)
+    metrics, valid_result = evaluate_model(model, valid_df)
+
+    save_artifacts(
+        model=model,
+        feature_cols=FEATURE_COLS,
+        metrics=metrics,
+        valid_result=valid_result
+    )
 
     print("===== TRAIN SUCCESS =====")
     print(f"Validation from : {split_date.date()}")
@@ -38,10 +47,10 @@ def main():
     print(f"R2              : {metrics['R2']:.4f}")
     print(f"MAPE            : {metrics['MAPE']:.2f}%")
     print(f"SMAPE           : {metrics['SMAPE']:.2f}%")
-
-    save_model(model)
-    print("Model saved to model/model.pkl")
-    print("Features saved to model/features.pkl")
+    print("Saved: model/model.pkl")
+    print("Saved: model/features.pkl")
+    print("Saved: model/metrics.pkl")
+    print("Saved: model/valid_result.pkl")
 
 
 if __name__ == "__main__":

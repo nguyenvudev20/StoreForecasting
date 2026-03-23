@@ -1,7 +1,7 @@
 import os
 import pickle
 import warnings
-from typing import Tuple, Dict
+from typing import Dict, Tuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -9,6 +9,12 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from xgboost import XGBRegressor
 
 warnings.filterwarnings("ignore")
+
+MODEL_DIR = "model"
+MODEL_PATH = os.path.join(MODEL_DIR, "model.pkl")
+FEATURE_PATH = os.path.join(MODEL_DIR, "features.pkl")
+METRICS_PATH = os.path.join(MODEL_DIR, "metrics.pkl")
+VALID_RESULT_PATH = os.path.join(MODEL_DIR, "valid_result.pkl")
 
 FEATURE_COLS = [
     "store",
@@ -72,11 +78,11 @@ def add_lag_features(df: pd.DataFrame, lags=(7, 14, 28, 30)) -> pd.DataFrame:
 
 def add_rolling_features(df: pd.DataFrame, windows=(7, 30)) -> pd.DataFrame:
     df = df.copy().sort_values(["store", "item", "date"])
-    for w in windows:
-        df[f"rolling_mean_{w}"] = (
+    for window in windows:
+        df[f"rolling_mean_{window}"] = (
             df.groupby(["store", "item"])["sales"]
             .shift(1)
-            .rolling(window=w)
+            .rolling(window=window)
             .mean()
         )
     return df
@@ -119,9 +125,19 @@ def build_model():
     )
 
 
+def fit_model(train_df: pd.DataFrame):
+    X_train = train_df[FEATURE_COLS]
+    y_train = train_df["sales"]
+
+    model = build_model()
+    model.fit(X_train, y_train)
+    return model
+
+
 def evaluate_model(model, valid_df: pd.DataFrame):
     X_valid = valid_df[FEATURE_COLS]
     y_valid = valid_df["sales"]
+
     preds = model.predict(X_valid)
 
     metrics = {
@@ -137,28 +153,64 @@ def evaluate_model(model, valid_df: pd.DataFrame):
     return metrics, result_df
 
 
-def fit_model(train_df: pd.DataFrame):
-    X_train = train_df[FEATURE_COLS]
-    y_train = train_df["sales"]
-    model = build_model()
-    model.fit(X_train, y_train)
-    return model
+def model_exists(
+    model_path: str = MODEL_PATH,
+    feature_path: str = FEATURE_PATH,
+):
+    return os.path.exists(model_path) and os.path.exists(feature_path)
 
 
-def save_model(model, model_path="model/model.pkl", feature_path="model/features.pkl"):
-    os.makedirs("model", exist_ok=True)
+def save_artifacts(
+    model,
+    feature_cols=FEATURE_COLS,
+    metrics: Optional[Dict] = None,
+    valid_result: Optional[pd.DataFrame] = None,
+    model_path: str = MODEL_PATH,
+    feature_path: str = FEATURE_PATH,
+    metrics_path: str = METRICS_PATH,
+    valid_result_path: str = VALID_RESULT_PATH,
+):
+    os.makedirs(MODEL_DIR, exist_ok=True)
+
     with open(model_path, "wb") as f:
         pickle.dump(model, f)
+
     with open(feature_path, "wb") as f:
-        pickle.dump(FEATURE_COLS, f)
+        pickle.dump(feature_cols, f)
+
+    if metrics is not None:
+        with open(metrics_path, "wb") as f:
+            pickle.dump(metrics, f)
+
+    if valid_result is not None:
+        with open(valid_result_path, "wb") as f:
+            pickle.dump(valid_result, f)
 
 
-def load_model(model_path="model/model.pkl", feature_path="model/features.pkl"):
+def load_artifacts(
+    model_path: str = MODEL_PATH,
+    feature_path: str = FEATURE_PATH,
+    metrics_path: str = METRICS_PATH,
+    valid_result_path: str = VALID_RESULT_PATH,
+):
     with open(model_path, "rb") as f:
         model = pickle.load(f)
+
     with open(feature_path, "rb") as f:
         feature_cols = pickle.load(f)
-    return model, feature_cols
+
+    metrics = None
+    valid_result = None
+
+    if os.path.exists(metrics_path):
+        with open(metrics_path, "rb") as f:
+            metrics = pickle.load(f)
+
+    if os.path.exists(valid_result_path):
+        with open(valid_result_path, "rb") as f:
+            valid_result = pickle.load(f)
+
+    return model, feature_cols, metrics, valid_result
 
 
 def get_series(df: pd.DataFrame, store: int, item: int) -> pd.DataFrame:
@@ -166,7 +218,12 @@ def get_series(df: pd.DataFrame, store: int, item: int) -> pd.DataFrame:
     return out.sort_values("date")
 
 
-def build_single_feature_row(history_df: pd.DataFrame, forecast_date: pd.Timestamp, store: int, item: int):
+def build_single_feature_row(
+    history_df: pd.DataFrame,
+    forecast_date: pd.Timestamp,
+    store: int,
+    item: int
+):
     hist = history_df.sort_values("date").copy()
     sales_list = hist["sales"].tolist()
 
@@ -190,10 +247,18 @@ def build_single_feature_row(history_df: pd.DataFrame, forecast_date: pd.Timesta
         "rolling_mean_7": float(np.mean(sales_list[-7:])),
         "rolling_mean_30": float(np.mean(sales_list[-30:])),
     }
+
     return pd.DataFrame([row])
 
 
-def recursive_forecast(history_df: pd.DataFrame, model, forecast_days: int, store: int, item: int):
+def recursive_forecast(
+    history_df: pd.DataFrame,
+    model,
+    forecast_days: int,
+    store: int,
+    item: int,
+    feature_cols=FEATURE_COLS,
+):
     temp_hist = history_df.sort_values("date")[["date", "sales"]].copy()
     temp_hist["date"] = pd.to_datetime(temp_hist["date"])
 
@@ -203,7 +268,7 @@ def recursive_forecast(history_df: pd.DataFrame, model, forecast_days: int, stor
     for _ in range(forecast_days):
         next_date = last_date + pd.Timedelta(days=1)
         feature_df = build_single_feature_row(temp_hist, next_date, store, item)
-        pred = float(model.predict(feature_df[FEATURE_COLS])[0])
+        pred = float(model.predict(feature_df[feature_cols])[0])
         pred = max(0.0, pred)
 
         results.append({

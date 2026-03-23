@@ -13,6 +13,10 @@ from utils import (
     get_series,
     recursive_forecast,
     compute_inventory_suggestion,
+    model_exists,
+    load_artifacts,
+    save_artifacts,
+    FEATURE_COLS,
 )
 
 st.set_page_config(
@@ -21,7 +25,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# ---------- CSS ----------
 st.markdown("""
 <style>
 .block-container {padding-top: 1.2rem; padding-bottom: 1rem;}
@@ -48,7 +51,25 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- Sidebar ----------
+
+def kpi_card(title, value):
+    st.markdown(
+        f"""
+        <div class="kpi-card">
+            <div class="kpi-title">{title}</div>
+            <div class="kpi-value">{value}</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+@st.cache_data
+def load_csv(file):
+    df = pd.read_csv(file)
+    return df
+
+
 st.sidebar.title("📌 Menu")
 menu = st.sidebar.radio(
     "Chọn chức năng",
@@ -66,12 +87,22 @@ uploaded_file = st.sidebar.file_uploader(
     help="Yêu cầu cột: date, store, item, sales"
 )
 
+# Auto load model nếu đã có
+if "model" not in st.session_state and model_exists():
+    model, feature_cols, metrics, valid_result = load_artifacts()
+    st.session_state["model"] = model
+    st.session_state["feature_cols"] = feature_cols
+    st.session_state["metrics"] = metrics
+    st.session_state["valid_result"] = valid_result
+    st.sidebar.success("Đã load model đã lưu.")
+
 if uploaded_file is None:
     st.info("Hãy upload file CSV từ sidebar để bắt đầu.")
     st.stop()
 
-raw_df = pd.read_csv(uploaded_file)
+raw_df = load_csv(uploaded_file)
 missing = validate_columns(raw_df)
+
 if missing:
     st.error(f"Thiếu cột bắt buộc: {missing}")
     st.stop()
@@ -80,19 +111,7 @@ raw_df["date"] = pd.to_datetime(raw_df["date"], errors="coerce")
 raw_df = raw_df.dropna(subset=["date"]).copy()
 raw_df = raw_df.sort_values(["store", "item", "date"]).reset_index(drop=True)
 
-# ---------- Helper KPI ----------
-def kpi_card(title, value):
-    st.markdown(
-        f"""
-        <div class="kpi-card">
-            <div class="kpi-title">{title}</div>
-            <div class="kpi-value">{value}</div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-# ---------- Tổng quan ----------
+# Tổng quan
 if menu == "Tổng quan":
     st.title("📦 Hệ thống dự báo nhu cầu và tối ưu tồn kho")
     st.caption("Ứng dụng AI hỗ trợ doanh nghiệp dự báo nhu cầu bán hàng theo cửa hàng và sản phẩm.")
@@ -101,9 +120,9 @@ if menu == "Tổng quan":
     with c1:
         kpi_card("Số dòng dữ liệu", f"{len(raw_df):,}")
     with c2:
-        kpi_card("Số cửa hàng", raw_df['store'].nunique())
+        kpi_card("Số cửa hàng", raw_df["store"].nunique())
     with c3:
-        kpi_card("Số sản phẩm", raw_df['item'].nunique())
+        kpi_card("Số sản phẩm", raw_df["item"].nunique())
     with c4:
         kpi_card("Khoảng ngày", f"{raw_df['date'].min().date()} → {raw_df['date'].max().date()}")
 
@@ -114,11 +133,18 @@ if menu == "Tổng quan":
     fig = px.line(sales_by_date, x="date", y="sales", title="Tổng doanh số theo thời gian")
     st.plotly_chart(fig, use_container_width=True)
 
-# ---------- Huấn luyện ----------
+# Huấn luyện mô hình
 elif menu == "Huấn luyện mô hình":
     st.title("🧠 Huấn luyện mô hình")
 
-    if st.button("Train model"):
+    if model_exists():
+        st.success("Model đã tồn tại. App sẽ dùng model đã lưu.")
+        button_text = "Train lại model"
+    else:
+        st.warning("Chưa có model. Cần train lần đầu.")
+        button_text = "Train model lần đầu"
+
+    if st.button(button_text):
         with st.spinner("Đang xử lý dữ liệu và huấn luyện model..."):
             df_feat = preprocess_training_data(raw_df)
             train_df, valid_df, split_date = train_valid_split_by_date(df_feat, valid_days=valid_days)
@@ -130,19 +156,23 @@ elif menu == "Huấn luyện mô hình":
             model = fit_model(train_df)
             metrics, valid_result = evaluate_model(model, valid_df)
 
+            save_artifacts(
+                model=model,
+                feature_cols=FEATURE_COLS,
+                metrics=metrics,
+                valid_result=valid_result
+            )
+
             st.session_state["model"] = model
+            st.session_state["feature_cols"] = FEATURE_COLS
             st.session_state["metrics"] = metrics
             st.session_state["valid_result"] = valid_result
-            st.session_state["df_feat"] = df_feat
             st.session_state["split_date"] = split_date
 
-            st.success("Huấn luyện thành công.")
+            st.success("Huấn luyện và lưu model thành công.")
 
-    if "metrics" in st.session_state:
+    if "metrics" in st.session_state and st.session_state["metrics"] is not None:
         metrics = st.session_state["metrics"]
-        split_date = st.session_state["split_date"]
-
-        st.markdown(f"**Validation bắt đầu từ:** {split_date.date()}")
 
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("MAE", f"{metrics['MAE']:.2f}")
@@ -151,14 +181,17 @@ elif menu == "Huấn luyện mô hình":
         c4.metric("MAPE", f"{metrics['MAPE']:.2f}%")
         c5.metric("SMAPE", f"{metrics['SMAPE']:.2f}%")
 
-        st.markdown('<div class="small-note">Gợi ý: với forecasting, nên ưu tiên RMSE, MAE, SMAPE hơn "accuracy".</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="small-note">Với forecasting, nên ưu tiên RMSE, MAE, SMAPE hơn "accuracy".</div>',
+            unsafe_allow_html=True
+        )
 
-# ---------- Dashboard ----------
+# Dashboard
 elif menu == "Dashboard":
     st.title("📊 Dashboard")
 
     if "model" not in st.session_state:
-        st.warning("Hãy vào mục 'Huấn luyện mô hình' và train model trước.")
+        st.warning("Hãy vào mục 'Huấn luyện mô hình' để train hoặc load model trước.")
         st.stop()
 
     selected_store = st.selectbox("Chọn Store", sorted(raw_df["store"].unique().tolist()))
@@ -166,28 +199,36 @@ elif menu == "Dashboard":
     selected_item = st.selectbox("Chọn Item", item_options)
 
     series_df = get_series(raw_df, selected_store, selected_item)
-    valid_result = st.session_state["valid_result"]
+    valid_result = st.session_state.get("valid_result")
 
     tab1, tab2, tab3 = st.tabs(["Lịch sử bán hàng", "Actual vs Predicted", "Phân tích"])
 
     with tab1:
-        fig_hist = px.line(series_df, x="date", y="sales", title=f"Sales History - Store {selected_store}, Item {selected_item}")
+        fig_hist = px.line(
+            series_df,
+            x="date",
+            y="sales",
+            title=f"Sales History - Store {selected_store}, Item {selected_item}"
+        )
         st.plotly_chart(fig_hist, use_container_width=True)
 
     with tab2:
-        vr = valid_result[
-            (valid_result["store"] == selected_store) &
-            (valid_result["item"] == selected_item)
-        ].copy()
+        if valid_result is not None:
+            vr = valid_result[
+                (valid_result["store"] == selected_store) &
+                (valid_result["item"] == selected_item)
+            ].copy()
 
-        if len(vr) > 0:
-            fig_compare = go.Figure()
-            fig_compare.add_trace(go.Scatter(x=vr["date"], y=vr["sales"], mode="lines", name="Actual"))
-            fig_compare.add_trace(go.Scatter(x=vr["date"], y=vr["pred"], mode="lines", name="Predicted"))
-            fig_compare.update_layout(title="Actual vs Predicted")
-            st.plotly_chart(fig_compare, use_container_width=True)
+            if len(vr) > 0:
+                fig_compare = go.Figure()
+                fig_compare.add_trace(go.Scatter(x=vr["date"], y=vr["sales"], mode="lines", name="Actual"))
+                fig_compare.add_trace(go.Scatter(x=vr["date"], y=vr["pred"], mode="lines", name="Predicted"))
+                fig_compare.update_layout(title="Actual vs Predicted")
+                st.plotly_chart(fig_compare, use_container_width=True)
+            else:
+                st.info("Không có dữ liệu validation cho store-item này.")
         else:
-            st.info("Không có dữ liệu validation cho store-item này.")
+            st.info("Chưa có valid_result. Hãy train model ít nhất 1 lần.")
 
     with tab3:
         month_df = series_df.copy()
@@ -202,19 +243,27 @@ elif menu == "Dashboard":
 
         a, b = st.columns(2)
         with a:
-            st.plotly_chart(px.bar(month_avg, x="month", y="sales", title="Average Sales by Month"), use_container_width=True)
+            st.plotly_chart(
+                px.bar(month_avg, x="month", y="sales", title="Average Sales by Month"),
+                use_container_width=True
+            )
         with b:
-            st.plotly_chart(px.bar(dow_avg, x="dow", y="sales", title="Average Sales by Day of Week"), use_container_width=True)
+            st.plotly_chart(
+                px.bar(dow_avg, x="dow", y="sales", title="Average Sales by Day of Week"),
+                use_container_width=True
+            )
 
-# ---------- Dự báo ----------
+# Dự báo
 elif menu == "Dự báo":
     st.title("🔮 Dự báo nhu cầu")
 
     if "model" not in st.session_state:
-        st.warning("Hãy train model trước.")
+        st.warning("Hãy train hoặc load model trước.")
         st.stop()
 
     model = st.session_state["model"]
+    feature_cols = st.session_state.get("feature_cols", FEATURE_COLS)
+
     selected_store = st.selectbox("Store", sorted(raw_df["store"].unique().tolist()))
     item_options = sorted(raw_df[raw_df["store"] == selected_store]["item"].unique().tolist())
     selected_item = st.selectbox("Item", item_options)
@@ -228,7 +277,8 @@ elif menu == "Dự báo":
                 model=model,
                 forecast_days=forecast_days,
                 store=selected_store,
-                item=selected_item
+                item=selected_item,
+                feature_cols=feature_cols
             )
 
             st.session_state["future_df"] = future_df
@@ -256,22 +306,25 @@ elif menu == "Dự báo":
         except Exception as e:
             st.error(f"Lỗi dự báo: {e}")
 
-# ---------- Tồn kho ----------
+# Tối ưu tồn kho
 elif menu == "Tối ưu tồn kho":
     st.title("📦 Tối ưu tồn kho")
 
     selected_store = st.selectbox("Store", sorted(raw_df["store"].unique().tolist()), key="inv_store")
     item_options = sorted(raw_df[raw_df["store"] == selected_store]["item"].unique().tolist())
     selected_item = st.selectbox("Item", item_options, key="inv_item")
+
     series_df = get_series(raw_df, selected_store, selected_item)
 
     current_inventory = st.number_input("Tồn kho hiện tại", min_value=0.0, value=100.0)
     lead_time_days = st.number_input("Lead time (ngày)", min_value=1, value=7)
     horizon = st.number_input("Số ngày nhu cầu cần tính", min_value=1, max_value=90, value=7)
 
-    if "future_df" in st.session_state and \
-       st.session_state.get("selected_store") == selected_store and \
-       st.session_state.get("selected_item") == selected_item:
+    if (
+        "future_df" in st.session_state and
+        st.session_state.get("selected_store") == selected_store and
+        st.session_state.get("selected_item") == selected_item
+    ):
         future_df = st.session_state["future_df"]
         demand_for_horizon = future_df.head(horizon)["forecast_sales"].sum()
         avg_daily_demand = future_df.head(horizon)["forecast_sales"].mean()
