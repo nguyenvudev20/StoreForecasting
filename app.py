@@ -99,6 +99,7 @@ if "model" not in st.session_state and model_exists():
 if uploaded_file is None:
     st.info("Hãy upload file CSV từ sidebar để bắt đầu.")
     st.stop()
+    uploaded_file = 'https://raw.githubusercontent.com/nguyenvudev20/StoreForecasting/refs/heads/master/train.csv'
 
 raw_df = load_csv(uploaded_file)
 missing = validate_columns(raw_df)
